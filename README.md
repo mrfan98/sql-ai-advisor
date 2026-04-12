@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # 智能SQL优化顾问
 
 智能SQL优化顾问是一个Java组件，能够自动分析SQL语句，结合数据库元数据和AI能力，检测性能瓶颈（如全表扫描、缺失索引、隐式转换等），并生成优化建议和改写后的SQL。
@@ -131,3 +132,7 @@ sql-optimizer-parent/
 ## 许可证
 
 MIT License
+=======
+# sql-ai-advisor
+The Intelligent SQL Optimization Advisor is a Java component that can automatically analyze SQL statements, combine database metadata and AI capabilities, detect performance bottlenecks (such as full table scans, missing indexes, implicit conversions, etc.), and generate optimization suggestions and rewritten SQL.
+>>>>>>> 0443d421569518daffc968882a01305395fa9a65
