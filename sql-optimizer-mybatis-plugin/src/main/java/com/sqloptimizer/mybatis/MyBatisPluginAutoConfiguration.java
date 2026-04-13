@@ -1,7 +1,7 @@
 package com.sqloptimizer.mybatis;
 
 import com.sqloptimizer.core.service.SqlOptimizerService;
-import org.apache.ibatis.plugin.SqlOptimizerInterceptor;
+import com.sqloptimizer.mybatis.SqlOptimizerInterceptor;
 import org.mybatis.spring.SqlSessionFactoryBean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

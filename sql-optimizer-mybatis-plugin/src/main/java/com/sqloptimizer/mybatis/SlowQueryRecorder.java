@@ -53,6 +53,7 @@ public class SlowQueryRecorder {
      */
     private void updateRedisStats(SqlExecutionContext context, String date) {
         try {
+            String prefix = properties.getRedisKeyPrefix();
             String statsKey = prefix + "stats:" + date;
             String sqlHashSetKey = prefix + "sql_hash:" + date;
 
@@ -76,7 +77,7 @@ public class SlowQueryRecorder {
 
             // 更新按数据库类型的统计
             if (context.getDatabaseType() != null) {
-                String dbTypeKey = prefix + "stats:" + date + ":" + context.getDatabaseType();
+                String dbTypeKey = properties.getRedisKeyPrefix() + "stats:" + date + ":" + context.getDatabaseType();
                 redisTemplate.opsForHash().increment(dbTypeKey, "count", 1);
                 redisTemplate.opsForHash().increment(dbTypeKey, "time", context.getExecutionTimeMs());
                 redisTemplate.expire(dbTypeKey, properties.getStatsTtlDays(), TimeUnit.DAYS);

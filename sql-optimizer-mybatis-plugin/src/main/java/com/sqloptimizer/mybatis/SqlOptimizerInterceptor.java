@@ -4,6 +4,7 @@ import com.sqloptimizer.core.model.OptimizationReport;
 import com.sqloptimizer.core.service.SqlOptimizerService;
 import org.apache.ibatis.mapping.BoundSql;
 import org.apache.ibatis.mapping.MappedStatement;
+import org.apache.ibatis.cache.CacheKey;
 import org.apache.ibatis.plugin.*;
 import org.apache.ibatis.session.Configuration;
 import org.apache.ibatis.session.ResultHandler;
@@ -99,12 +100,11 @@ public class SqlOptimizerInterceptor implements Interceptor {
             if (invocation.getArgs().length > 5) {
                 return (BoundSql) invocation.getArgs()[5];
             }
-            // 通过反射获取
-            Configuration configuration = ms.getConfiguration();
-            return configuration.newBoundSql(ms, parameter);
+            // 通过 MappedStatement 获取
+            return ms.getBoundSql(parameter);
         } catch (Exception e) {
             log.warn("Failed to get BoundSql", e);
-            return new BoundSql(ms.getConfiguration(), "UNKNOWN_SQL", ms.getParameterMappings(), parameter);
+            return new BoundSql(ms.getConfiguration(), "UNKNOWN_SQL", new java.util.ArrayList<>(), parameter);
         }
     }
 
@@ -165,11 +165,6 @@ public class SqlOptimizerInterceptor implements Interceptor {
     @Override
     public Object plugin(Object target) {
         return Plugin.wrap(target, this);
-    }
-
-    @Override
-    public void setProperties(org.apache.ibatis.session.Configuration configuration) {
-        // MyBatis 3.x 要求实现此方法但可以为空
     }
 
     @Override
