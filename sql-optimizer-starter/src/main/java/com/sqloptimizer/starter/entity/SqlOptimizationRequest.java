@@ -73,6 +73,11 @@ public class SqlOptimizationRequest {
     private Timestamp reviewedAt;
 
     /**
+     * SQL执行时间（毫秒），用于判断是否为慢查询
+     */
+    private Long executionTimeMs;
+
+    /**
      * 执行时间
      */
     private Timestamp executedAt;
@@ -156,6 +161,14 @@ public class SqlOptimizationRequest {
 
     public void setAnalysisTimeMs(Long analysisTimeMs) {
         this.analysisTimeMs = analysisTimeMs;
+    }
+
+    public Long getExecutionTimeMs() {
+        return executionTimeMs;
+    }
+
+    public void setExecutionTimeMs(Long executionTimeMs) {
+        this.executionTimeMs = executionTimeMs;
     }
 
     public String getReviewer() {

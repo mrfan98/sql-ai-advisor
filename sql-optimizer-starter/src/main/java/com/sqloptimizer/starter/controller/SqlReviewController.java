@@ -37,7 +37,7 @@ public class SqlReviewController {
             @RequestParam(required = false) String mapperId,
             @RequestParam(required = false) String databaseType) {
 
-        SqlOptimizationRequest request = optimizationService.submitForOptimization(sql, mapperId, databaseType);
+        SqlOptimizationRequest request = optimizationService.submitForOptimization(sql, mapperId, null);
 
         Map<String, Object> response = new HashMap<>();
         response.put("requestId", request.getId());  // Note: ID is not set in current implementation

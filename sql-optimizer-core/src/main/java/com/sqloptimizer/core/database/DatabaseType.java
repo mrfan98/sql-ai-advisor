@@ -92,4 +92,36 @@ public enum DatabaseType {
         }
         return UNKNOWN;
     }
+
+    /**
+     * 根据产品名称检测数据库类型
+     */
+    public static DatabaseType fromProductName(String productName) {
+        if (productName == null) {
+            return UNKNOWN;
+        }
+
+        String lower = productName.toLowerCase();
+        if (lower.contains("mysql")) {
+            return MYSQL;
+        } else if (lower.contains("postgresql") || lower.contains("postgres")) {
+            return POSTGRESQL;
+        } else if (lower.contains("oracle")) {
+            return ORACLE;
+        } else if (lower.contains("sql server") || lower.contains("microsoft")) {
+            return SQLSERVER;
+        } else if (lower.contains("dm") || lower.contains("dameng")) {
+            return DM;
+        } else if (lower.contains("kingbase")) {
+            return KINGBASE;
+        } else if (lower.contains("oceanbase")) {
+            return OCEANBASE;
+        } else if (lower.contains("clickhouse")) {
+            return CLICKHOUSE;
+        } else if (lower.contains("h2")) {
+            return H2;
+        }
+
+        return UNKNOWN;
+    }
 }

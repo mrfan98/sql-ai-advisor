@@ -16,6 +16,8 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 import org.springframework.data.redis.core.RedisTemplate;
 
+import javax.sql.DataSource;
+
 /**
  * SQL优化Starter自动配置
  */
@@ -42,8 +44,9 @@ public class SqlOptimizerAutoConfiguration {
     public SqlOptimizationService sqlOptimizationService(
             SqlOptimizerService sqlOptimizerService,
             SqlRuleEngine ruleEngine,
-            RedisTemplate<String, Object> redisTemplate) {
-        return new SqlOptimizationService(sqlOptimizerService, ruleEngine, redisTemplate, properties);
+            RedisTemplate<String, Object> redisTemplate,
+            DataSource dataSource) {
+        return new SqlOptimizationService(sqlOptimizerService, ruleEngine, redisTemplate, properties, dataSource);
     }
 
     /**

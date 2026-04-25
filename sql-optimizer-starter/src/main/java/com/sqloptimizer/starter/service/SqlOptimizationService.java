@@ -5,6 +5,7 @@ import com.sqloptimizer.starter.entity.SqlAdvice;
 import com.sqloptimizer.starter.entity.SqlIssue;
 import com.sqloptimizer.starter.entity.SqlOptimizationRequest;
 import com.sqloptimizer.starter.workflow.SqlReviewStatus;
+import com.sqloptimizer.core.database.DatabaseType;
 import com.sqloptimizer.core.model.OptimizationAdvice;
 import com.sqloptimizer.core.model.OptimizationIssue;
 import com.sqloptimizer.core.model.OptimizationReport;
@@ -15,12 +16,15 @@ import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
 
+import javax.sql.DataSource;
+import java.sql.Connection;
+import java.sql.DatabaseMetaData;
 import java.sql.Timestamp;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 /**
@@ -31,15 +35,10 @@ public class SqlOptimizationService {
 
     private static final Logger log = LoggerFactory.getLogger(SqlOptimizationService.class);
 
-    private final SqlOptimizerService sqlOptimizerService;
-    private final SqlRuleEngine ruleEngine;
-    private final RedisTemplate<String, Object> redisTemplate;
-    private final SqlOptimizerStarterProperties properties;
-
     /**
-     * SQL替换缓存 - 审核通过后，原始SQL -> 优化SQL 的映射
+     * 替换缓存Redis Key前缀
      */
-    private final Map<String, String> sqlReplacementCache = new ConcurrentHashMap<>();
+    private static final String REPLACEMENT_CACHE_KEY_PREFIX = "sql_optimizer:replacement:";
 
     /**
      * 待审核队列 - 使用Redis List存储
@@ -51,21 +50,55 @@ public class SqlOptimizationService {
      */
     private static final String REQUEST_KEY_PREFIX = "sql_optimizer:request:";
 
+    /**
+     * 限流窗口时间（秒）
+     */
+    private static final long RATE_LIMIT_WINDOW_SECONDS = 60;
+
+    /**
+     * 限流阈值（每个窗口内最大提交数）
+     */
+    private static final int RATE_LIMIT_MAX_SUBMISSIONS = 100;
+
+    /**
+     * 限流计数器 key
+     */
+    private static final String RATE_LIMIT_KEY = "sql_optimizer:rate_limit:submit_count";
+
+    private final SqlOptimizerService sqlOptimizerService;
+    private final SqlRuleEngine ruleEngine;
+    private final RedisTemplate<String, Object> redisTemplate;
+    private final SqlOptimizerStarterProperties properties;
+    private final DataSource dataSource;
+
     public SqlOptimizationService(SqlOptimizerService sqlOptimizerService,
                                   SqlRuleEngine ruleEngine,
                                   RedisTemplate<String, Object> redisTemplate,
-                                  SqlOptimizerStarterProperties properties) {
+                                  SqlOptimizerStarterProperties properties,
+                                  DataSource dataSource) {
         this.sqlOptimizerService = sqlOptimizerService;
         this.ruleEngine = ruleEngine;
         this.redisTemplate = redisTemplate;
         this.properties = properties;
+        this.dataSource = dataSource;
     }
 
     /**
      * 提交SQL进行优化分析
+     * @param executionTimeMs 执行时间（毫秒），用于判断是否为慢查询，可为null
+     * @return null 如果被限流拒绝
      */
-    public SqlOptimizationRequest submitForOptimization(String sql, String mapperId, String databaseType) {
+    public SqlOptimizationRequest submitForOptimization(String sql, String mapperId, Long executionTimeMs) {
+        // 限流检查
+        if (!checkRateLimit()) {
+            log.warn("Rate limit exceeded, submission rejected: mapperId={}, sql={}", mapperId, truncateSql(sql));
+            return null;
+        }
+
         long startTime = System.currentTimeMillis();
+
+        // 自动检测数据库类型
+        String databaseType = detectDatabaseType();
 
         // 规则引擎预分析
         List<OptimizationIssue> ruleIssues = ruleEngine.analyze(sql);
@@ -75,7 +108,8 @@ public class SqlOptimizationService {
         SqlOptimizationRequest request = new SqlOptimizationRequest();
         request.setOriginalSql(sql);
         request.setMapperId(mapperId);
-        request.setDatabaseType(databaseType != null ? databaseType : "DM");
+        request.setDatabaseType(databaseType);
+        request.setExecutionTimeMs(executionTimeMs);
         request.setSubmittedAt(new Timestamp(System.currentTimeMillis()));
         request.setAnalysisTimeMs(System.currentTimeMillis() - startTime);
 
@@ -87,21 +121,21 @@ public class SqlOptimizationService {
         if (properties.getWorkflow().getReviewMode() == SqlOptimizerStarterProperties.ReviewMode.AUTO_APPROVE_ALL) {
             // 自动通过模式 - 直接执行优化
             initialStatus = SqlReviewStatus.APPROVED;
-            OptimizationReport report = sqlOptimizerService.analyze(sql, null);
+            OptimizationReport report = sqlOptimizerService.analyze(sql, dataSource);
             optimizedSql = report.getOptimizedSql();
             issues = convertIssues(report.getIssues());
             advices = convertAdvices(report.getAdvice());
-            sqlReplacementCache.put(generateSqlKey(sql), optimizedSql);
+            saveReplacementToRedis(sql, optimizedSql);
         } else if (canHandleByRule && properties.getWorkflow().isAutoApproveRuleBased()) {
             // 规则引擎能处理，自动通过
             initialStatus = SqlReviewStatus.SKIPPED;
             optimizedSql = ruleEngine.autoFix(sql);
             issues = convertRuleIssues(ruleIssues);
             advices = convertRuleAdvices(ruleIssues);
-            sqlReplacementCache.put(generateSqlKey(sql), optimizedSql);
+            saveReplacementToRedis(sql, optimizedSql);
         } else {
             // 需要AI分析或人工审核
-            OptimizationReport report = sqlOptimizerService.analyze(sql, null);
+            OptimizationReport report = sqlOptimizerService.analyze(sql, dataSource);
             optimizedSql = report.getOptimizedSql();
             issues = convertIssues(report.getIssues());
             advices = convertAdvices(report.getAdvice());
@@ -110,7 +144,7 @@ public class SqlOptimizationService {
                 && issues.stream().allMatch(i -> i.getType() == SqlIssue.IssueType.OTHER || i.getType() == SqlIssue.IssueType.SELECT_ALL_COLUMNS)) {
                 // 只有规则引擎能处理的问题，自动通过
                 initialStatus = SqlReviewStatus.APPROVED;
-                sqlReplacementCache.put(generateSqlKey(sql), optimizedSql);
+                saveReplacementToRedis(sql, optimizedSql);
             } else {
                 // 需要人工审核
                 initialStatus = SqlReviewStatus.PENDING;
@@ -135,6 +169,41 @@ public class SqlOptimizationService {
         }
 
         return request;
+    }
+
+    /**
+     * 限流检查
+     * 使用 Redis INCR + EXPIRE 实现滑动窗口限流
+     * @return true 如果允许提交，false 如果被限流拒绝
+     */
+    private boolean checkRateLimit() {
+        try {
+            String windowKey = RATE_LIMIT_KEY + ":" + (System.currentTimeMillis() / 1000 / RATE_LIMIT_WINDOW_SECONDS);
+            Long count = redisTemplate.opsForValue().increment(windowKey);
+            if (count != null && count == 1) {
+                // 第一次设置该窗口，过期时间设为窗口大小的2倍
+                redisTemplate.expire(windowKey, RATE_LIMIT_WINDOW_SECONDS * 2, TimeUnit.SECONDS);
+            }
+            return count == null || count <= RATE_LIMIT_MAX_SUBMISSIONS;
+        } catch (Exception e) {
+            log.warn("Rate limit check failed, allowing request: {}", e.getMessage());
+            return true; // Redis异常时允许通过，避免影响业务
+        }
+    }
+
+    /**
+     * 从DataSource自动检测数据库类型
+     */
+    private String detectDatabaseType() {
+        try (Connection conn = dataSource.getConnection()) {
+            DatabaseMetaData metaData = conn.getMetaData();
+            String productName = metaData.getDatabaseProductName();
+            DatabaseType dbType = DatabaseType.fromProductName(productName);
+            return dbType != DatabaseType.UNKNOWN ? dbType.name() : productName;
+        } catch (Exception e) {
+            log.debug("Failed to detect database type: {}", e.getMessage());
+            return "UNKNOWN";
+        }
     }
 
     /**
@@ -180,9 +249,9 @@ public class SqlOptimizationService {
         // 从待审核队列移除
         redisTemplate.opsForList().remove(PENDING_QUEUE_KEY, 1, requestId);
 
-        // 如果批准，加入替换缓存
+        // 如果批准，持久化到Redis替换缓存
         if (approved && request.getOptimizedSql() != null) {
-            sqlReplacementCache.put(generateSqlKey(request.getOriginalSql()), request.getOptimizedSql());
+            saveReplacementToRedis(request.getOriginalSql(), request.getOptimizedSql());
             log.info("SQL optimization approved: id={}, reviewer={}", requestId, reviewer);
         }
 
@@ -190,10 +259,17 @@ public class SqlOptimizationService {
     }
 
     /**
-     * 获取优化后的SQL（如果有缓存的批准结果）
+     * 从Redis获取优化后的SQL（如果有缓存的批准结果）
      */
     public String getOptimizedSql(String originalSql) {
-        return sqlReplacementCache.get(generateSqlKey(originalSql));
+        String cacheKey = REPLACEMENT_CACHE_KEY_PREFIX + generateSqlKey(originalSql);
+        try {
+            Object cached = redisTemplate.opsForValue().get(cacheKey);
+            return cached != null ? cached.toString() : null;
+        } catch (Exception e) {
+            log.warn("Failed to get optimized SQL from Redis: {}", e.getMessage());
+            return null;
+        }
     }
 
     /**
@@ -203,7 +279,21 @@ public class SqlOptimizationService {
         if (properties.getMybatis().getInterceptMode() != SqlOptimizerStarterProperties.InterceptMode.MANUAL_REVIEW) {
             return false;
         }
-        return sqlReplacementCache.containsKey(generateSqlKey(sql));
+        return getOptimizedSql(sql) != null;
+    }
+
+    /**
+     * 将替换关系持久化到Redis
+     */
+    private void saveReplacementToRedis(String originalSql, String optimizedSql) {
+        String cacheKey = REPLACEMENT_CACHE_KEY_PREFIX + generateSqlKey(originalSql);
+        try {
+            redisTemplate.opsForValue().set(cacheKey, optimizedSql,
+                    properties.getWorkflow().getExpireDays(), TimeUnit.DAYS);
+        } catch (Exception e) {
+            log.error("Failed to save replacement to Redis: originalSql={}, error={}",
+                    truncateSql(originalSql), e.getMessage());
+        }
     }
 
     /**
@@ -260,6 +350,11 @@ public class SqlOptimizationService {
         // 简单处理：去除多余空格后哈希
         String normalized = sql.trim().replaceAll("\\s+", " ");
         return String.valueOf(normalized.hashCode());
+    }
+
+    private String truncateSql(String sql) {
+        if (sql == null) return "null";
+        return sql.length() > 100 ? sql.substring(0, 100) + "..." : sql;
     }
 
     /**
